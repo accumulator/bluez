@@ -81,6 +81,7 @@
 #define CTYPE_STABLE		0xC
 
 /* opcodes */
+#define OP_VENDORDEPENDENT	0x00
 #define OP_UNITINFO		0x30
 #define OP_SUBUNITINFO		0x31
 #define OP_PASSTHROUGH		0x7c
@@ -570,6 +571,18 @@ static gboolean control_cb(GIOChannel *chan, GIOCondition cond,
 			operands[1] = SUBUNIT_PANEL << 3;
 		DBG("reply to %s", avrcp->opcode == OP_UNITINFO ?
 				"OP_UNITINFO" : "OP_SUBUNITINFO");
+	} else if (avctp->cr == AVCTP_COMMAND &&
+			(avrcp->code == CTYPE_STATUS ||
+				avrcp->code == CTYPE_CONTROL) &&
+			avrcp->subunit_type == SUBUNIT_PANEL &&
+			avrcp->opcode == OP_VENDORDEPENDENT &&
+			operand_count >= 3) {
+		uint32_t company_id = (operands[0] << 16) |
+					(operands[1] << 8) |
+					(operands[2]);
+		DBG("AVRCP vendor 0x%06X dependent command", company_id);
+		avctp->cr = AVCTP_RESPONSE;
+		avrcp->code = CTYPE_NOT_IMPLEMENTED;
 	} else {
 		avctp->cr = AVCTP_RESPONSE;
 		avrcp->code = CTYPE_REJECTED;
