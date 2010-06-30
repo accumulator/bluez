@@ -115,11 +115,33 @@
 #define E_INTERNAL		0x03
 
 /* PDU types for metadata transfer */
-#define GET_CAPABILITIES	0x10
+#define GET_CAPABILITIES		0x10
+#define LIST_PLAYER_SETTING_ATTRIBUTES	0x11
 
 /* Capabilities */
 #define CAP_COMPANY_ID		0x2
 #define CAP_EVENTS_SUPPORTED	0x3
+
+/* Player setting attribute IDs */
+#define ATTRIBUTE_ILLEGAL	0x0
+#define ATTRIBUTE_EQUALIZER	0x1
+#define ATTRIBUTE_REPEAT	0x2
+#define ATTRIBUTE_SHUFFLE	0x3
+#define ATTRIBUTE_SCAN		0x4
+
+/* Player setting attribute values */
+#define ATTRIBUTE_EQUALIZER_OFF	0x1
+#define ATTRIBUTE_EQUALIZER_ON	0x2
+#define ATTRIBUTE_REPEAT_OFF	0x1
+#define ATTRIBUTE_REPEAT_SINGLE	0x2
+#define ATTRIBUTE_REPEAT_ALL	0x3
+#define ATTRIBUTE_REPEAT_GROUP	0x4
+#define ATTRIBUTE_SHUFFLE_OFF	0x1
+#define ATTRIBUTE_SHUFFLE_ALL	0x2
+#define ATTRIBUTE_SHUFFLE_GROUP	0x3
+#define ATTRIBUTE_SCAN_OFF	0x1
+#define ATTRIBUTE_SCAN_ALL	0x2
+#define ATTRIBUTE_SCAN_GROUP	0x3
 
 /* Metadata transfer events */
 #define EVENT_PLAYBACK_STATUS_CHANGED	0x01
@@ -130,6 +152,12 @@
 #define EVENT_BATT_STATUS_CHANGED	0x06
 #define EVENT_SYSTEM_STATUS_CHANGED	0x07
 #define EVENT_PLAYER_SETTING_CHANGED	0x08
+
+/* MPRIS player capabilities */
+#define MPRIS_CAN_REPEAT	1 << 7
+#define MPRIS_CAN_LOOP		1 << 8
+#define MPRIS_CAN_SHUFFLE	1 << 9
+#define MPRIS_CAN_SCAN		1 << 10
 
 static DBusConnection *connection = NULL;
 
@@ -223,6 +251,8 @@ struct control {
 	gboolean target;
 
 	uint8_t key_quirks[256];
+
+	uint32_t mpris_caps;
 };
 
 static struct {
@@ -243,6 +273,12 @@ static struct {
 static GSList *avctp_callbacks = NULL;
 
 static void auth_cb(DBusError *derr, void *user_data);
+
+static inline DBusMessage *invalid_args(DBusMessage *msg)
+{
+	return g_dbus_create_error(msg, ERROR_INTERFACE ".InvalidArguments",
+			"Invalid arguments in method call");
+}
 
 static sdp_record_t *avrcp_ct_record()
 {
@@ -576,6 +612,28 @@ static void handle_metadata_pdu(struct control *control,
 			metadata->parameter_length = 1;
 			metadata_params[0] = E_INVALID_PARAM;
 			break;
+		}
+		break;
+	case LIST_PLAYER_SETTING_ATTRIBUTES:
+		avrcp->code = CTYPE_STABLE;
+
+		metadata->parameter_length = 1;
+		metadata_params[0] = 0; /* num player setting attributes */
+		if (control->mpris_caps & MPRIS_CAN_REPEAT ||
+			control->mpris_caps & MPRIS_CAN_LOOP) {
+			metadata->parameter_length++;
+			metadata_params[0]++;
+			metadata_params[metadata_params[0]] = ATTRIBUTE_REPEAT;
+		}
+		if (control->mpris_caps & MPRIS_CAN_SHUFFLE) {
+			metadata->parameter_length++;
+			metadata_params[0]++;
+			metadata_params[metadata_params[0]] = ATTRIBUTE_SHUFFLE;
+		}
+		if (control->mpris_caps & MPRIS_CAN_SCAN) {
+			metadata->parameter_length++;
+			metadata_params[0]++;
+			metadata_params[metadata_params[0]] = ATTRIBUTE_SCAN;
 		}
 		break;
 	default:
@@ -1202,15 +1260,61 @@ static DBusMessage *control_get_properties(DBusConnection *conn,
 	value = (device->control->state == AVCTP_STATE_CONNECTED);
 	dict_append_entry(&dict, "Connected", DBUS_TYPE_BOOLEAN, &value);
 
+	/* PlayerCapabilities */
+	value = device->control->mpris_caps;
+	dict_append_entry(&dict, "PlayerCapabilities", DBUS_TYPE_UINT32, &value);
+
 	dbus_message_iter_close_container(&iter, &dict);
 
 	return reply;
+}
+
+static DBusMessage *control_set_property(DBusConnection *conn,
+						DBusMessage *msg, void *data)
+{
+	struct audio_device *device = data;
+	struct control *control = device->control;
+	const char *property;
+	DBusMessageIter iter;
+	DBusMessageIter sub;
+
+	if (!dbus_message_iter_init(msg, &iter))
+		return invalid_args(msg);
+
+	if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_STRING)
+		return invalid_args(msg);
+
+	dbus_message_iter_get_basic(&iter, &property);
+	dbus_message_iter_next(&iter);
+
+	if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_VARIANT)
+		return invalid_args(msg);
+	dbus_message_iter_recurse(&iter, &sub);
+
+	if (g_str_equal("PlayerCapabilities", property)) {
+		uint32_t value;
+
+		if (dbus_message_iter_get_arg_type(&sub) != DBUS_TYPE_UINT32)
+			return invalid_args(msg);
+		dbus_message_iter_get_basic(&sub, &value);
+
+		control->mpris_caps = value;
+
+		emit_property_changed(conn, dbus_message_get_path(msg),
+					AUDIO_CONTROL_INTERFACE, property,
+					DBUS_TYPE_UINT32, &value);
+
+		return dbus_message_new_method_return(msg);
+	}
+
+	return invalid_args(msg);
 }
 
 static GDBusMethodTable control_methods[] = {
 	{ "IsConnected",	"",	"b",	control_is_connected,
 						G_DBUS_METHOD_FLAG_DEPRECATED },
 	{ "GetProperties",	"",	"a{sv}",control_get_properties },
+	{ "SetProperty",	"sv",	"",	control_set_property },
 	{ "VolumeUp",		"",	"",	volume_up },
 	{ "VolumeDown",		"",	"",	volume_down },
 	{ NULL, NULL, NULL, NULL }
