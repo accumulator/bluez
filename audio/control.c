@@ -105,6 +105,15 @@
 
 #define QUIRK_NO_RELEASE	1 << 0
 
+/* Company IDs for vendor dependent commands */
+#define IEEEID_BTSIG		0x001958
+
+/* Error codes */
+#define E_INVALID_COMMAND	0x00
+#define E_INVALID_PARAM		0x01
+#define E_PARAM_NOT_FOUND	0x02
+#define E_INTERNAL		0x03
+
 static DBusConnection *connection = NULL;
 
 static GSList *servers = NULL;
@@ -129,6 +138,14 @@ struct avrcp_header {
 } __attribute__ ((packed));
 #define AVRCP_HEADER_LENGTH 3
 
+struct metadata_header {
+	int8_t pdu_id;
+	uint8_t packet_type:2;
+	int8_t _rfa:6;
+	uint16_t parameter_length;
+} __attribute__ ((packed));
+#define METADATA_HEADER_LENGTH 4
+
 #elif __BYTE_ORDER == __BIG_ENDIAN
 
 struct avctp_header {
@@ -148,6 +165,14 @@ struct avrcp_header {
 	uint8_t opcode;
 } __attribute__ ((packed));
 #define AVRCP_HEADER_LENGTH 3
+
+struct metadata_header {
+	int8_t pdu_id;
+	int8_t _rfa:6;
+	uint8_t packet_type:2;
+	uint16_t parameter_length;
+} __attribute__ ((packed));
+#define METADATA_HEADER_LENGTH 4
 
 #else
 #error "Unknown byte order"
@@ -581,8 +606,14 @@ static gboolean control_cb(GIOChannel *chan, GIOCondition cond,
 					(operands[1] << 8) |
 					(operands[2]);
 		DBG("AVRCP vendor 0x%06X dependent command", company_id);
-		avctp->cr = AVCTP_RESPONSE;
-		avrcp->code = CTYPE_NOT_IMPLEMENTED;
+		if (company_id == IEEEID_BTSIG) {
+			DBG("AVRCP metadata PDU");
+			avctp->cr = AVCTP_RESPONSE;
+			avrcp->code = CTYPE_STABLE;
+		} else {
+			avctp->cr = AVCTP_RESPONSE;
+			avrcp->code = CTYPE_NOT_IMPLEMENTED;
+		}
 	} else {
 		avctp->cr = AVCTP_RESPONSE;
 		avrcp->code = CTYPE_REJECTED;
