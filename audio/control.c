@@ -114,6 +114,23 @@
 #define E_PARAM_NOT_FOUND	0x02
 #define E_INTERNAL		0x03
 
+/* PDU types for metadata transfer */
+#define GET_CAPABILITIES	0x10
+
+/* Capabilities */
+#define CAP_COMPANY_ID		0x2
+#define CAP_EVENTS_SUPPORTED	0x3
+
+/* Metadata transfer events */
+#define EVENT_PLAYBACK_STATUS_CHANGED	0x01
+#define EVENT_TRACK_CHANGED		0x02
+#define EVENT_TRACK_REACHED_END		0x03
+#define EVENT_TRACK_REACHED_START	0x04
+#define EVENT_PLAYBACK_POS_CHANGED	0x05
+#define EVENT_BATT_STATUS_CHANGED	0x06
+#define EVENT_SYSTEM_STATUS_CHANGED	0x07
+#define EVENT_PLAYER_SETTING_CHANGED	0x08
+
 static DBusConnection *connection = NULL;
 
 static GSList *servers = NULL;
@@ -513,6 +530,61 @@ static void avctp_set_state(struct control *control, avctp_state_t new_state)
 	}
 }
 
+static void handle_metadata_pdu(struct control *control,
+				struct avrcp_header *avrcp, int operand_count)
+{
+	struct metadata_header *metadata;
+	uint8_t *metadata_params;
+
+	metadata = (struct metadata_header *) avrcp + AVRCP_HEADER_LENGTH + 3;
+	metadata_params = (unsigned char *) metadata + METADATA_HEADER_LENGTH;
+
+	/* metadata segmentation */
+	if (metadata->packet_type != AVCTP_PACKET_SINGLE) {
+		avrcp->code = CTYPE_NOT_IMPLEMENTED;
+		return;
+	}
+
+	switch (metadata->pdu_id) {
+	case GET_CAPABILITIES:
+		if (metadata->parameter_length < 1) {
+			avrcp->code = CTYPE_REJECTED;
+			metadata->parameter_length = 1;
+			metadata_params[0] = E_INVALID_PARAM;
+			break;
+		}
+
+		switch(metadata_params[0]) { /* capability id */
+		case CAP_COMPANY_ID:
+			avrcp->code = CTYPE_STABLE;
+			metadata->parameter_length = 5;
+			metadata_params[1] = 1; /* capability count */
+			metadata_params[2] = (uint8_t) IEEEID_BTSIG & 0xFF0000;
+			metadata_params[3] = (uint8_t) IEEEID_BTSIG & 0x00FF00;
+			metadata_params[4] = IEEEID_BTSIG & 0x0000FF;
+			break;
+		case CAP_EVENTS_SUPPORTED:
+			avrcp->code = CTYPE_STABLE;
+			metadata->parameter_length = 5;
+			metadata_params[1] = 3; /* capability count */
+			metadata_params[2] = EVENT_PLAYBACK_STATUS_CHANGED;
+			metadata_params[3] = EVENT_TRACK_CHANGED;
+			metadata_params[4] = EVENT_TRACK_REACHED_END;
+			break;
+		default:
+			avrcp->code = CTYPE_REJECTED;
+			metadata->parameter_length = 1;
+			metadata_params[0] = E_INVALID_PARAM;
+			break;
+		}
+		break;
+	default:
+		avrcp->code = CTYPE_REJECTED;
+		metadata->parameter_length = 1;
+		metadata_params[0] = E_INVALID_COMMAND;
+	}
+}
+
 static gboolean control_cb(GIOChannel *chan, GIOCondition cond,
 				gpointer data)
 {
@@ -609,7 +681,7 @@ static gboolean control_cb(GIOChannel *chan, GIOCondition cond,
 		if (company_id == IEEEID_BTSIG) {
 			DBG("AVRCP metadata PDU");
 			avctp->cr = AVCTP_RESPONSE;
-			avrcp->code = CTYPE_STABLE;
+			handle_metadata_pdu(control, avrcp, operand_count);
 		} else {
 			avctp->cr = AVCTP_RESPONSE;
 			avrcp->code = CTYPE_NOT_IMPLEMENTED;
