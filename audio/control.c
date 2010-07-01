@@ -124,6 +124,7 @@
 #define GET_PLAYER_SETTING_VALUE_TEXT		0x16
 #define INFORM_DISPLAYABLE_CHARSET		0x17
 #define INFORM_BATT_STATUS_OF_CT		0x18
+#define GET_ELEMENT_ATTRIBUTES			0x20
 
 /* Capabilities */
 #define CAP_COMPANY_ID		0x2
@@ -149,6 +150,22 @@
 #define ATTRIBUTE_SCAN_OFF	0x1
 #define ATTRIBUTE_SCAN_ALL	0x2
 #define ATTRIBUTE_SCAN_GROUP	0x3
+
+/* Element IDs */
+#define ELEMENT_PLAYING		0x0000
+
+/* Metadata attributes */
+#define METADATA_ILLEGAL	0x0
+#define METADATA_TITLE		0x1
+#define METADATA_ARTIST		0x2
+#define METADATA_ALBUM		0x3
+#define METADATA_NUMBER		0x4
+#define METADATA_TOTAL		0x5
+#define METADATA_GENRE		0x6
+#define METADATA_PLAY_TIME	0x7
+
+/* Character sets */
+#define CHARSET_UTF8		0x6A
 
 /* Metadata transfer events */
 #define EVENT_PLAYBACK_STATUS_CHANGED	0x01
@@ -264,6 +281,13 @@ struct control {
 	gboolean mpris_shuffle_state;
 	gboolean mpris_repeat_state;
 	gboolean mpris_endless_state;
+
+	char *mpris_title;
+	char *mpris_artist;
+	char *mpris_album;
+	char *mpris_number;
+	char *mpris_genre;
+	uint32_t mpris_total;
 };
 
 static struct {
@@ -585,6 +609,7 @@ static void handle_metadata_pdu(struct control *control,
 	size_t params_count = metadata_length - METADATA_HEADER_LENGTH;
 	struct metadata_header *metadata;
 	uint8_t *metadata_params, rsp[params_count];
+	uint32_t element_id;
 
 	metadata = (struct metadata_header *) avrcp + AVRCP_HEADER_LENGTH + 3;
 	metadata_params = (unsigned char *) metadata + METADATA_HEADER_LENGTH;
@@ -883,10 +908,112 @@ static void handle_metadata_pdu(struct control *control,
 	case INFORM_BATT_STATUS_OF_CT:
 		avrcp->code = CTYPE_NOT_IMPLEMENTED;
 		break;
+	case GET_ELEMENT_ATTRIBUTES:
+		element_id = (metadata_params[0] << 24) |
+				(metadata_params[1] << 16) |
+				(metadata_params[2] << 8) |
+				metadata_params[3];
+		if (element_id != ELEMENT_PLAYING) {
+			avrcp->code = CTYPE_REJECTED;
+			metadata->parameter_length = 1;
+			metadata_params[0] = E_INVALID_PARAM;
+			break;
+		}
+		avrcp->code = CTYPE_STABLE;
+		rsp[rsp_i++] = metadata_params[4];
+		for (i = 0; i < metadata_params[4]; i++) {
+			char metainfo[65536];
+			uint16_t attribute_id = (metadata_params[i*2+5] << 8) |
+						metadata_params[i*2+5+1];
+			switch (attribute_id) {
+			case METADATA_TITLE:
+				rsp[rsp_i++] = (uint8_t) METADATA_TITLE &
+						0xFF00;
+				rsp[rsp_i++] = (uint8_t) METADATA_TITLE &
+						0x00FF;
+				snprintf(metainfo, 65536, "%s", "Get title from MPRIS");
+				rsp[rsp_i++] = strlen(metainfo);
+				memcpy(rsp + rsp_i, metainfo, rsp[rsp_i-1]);
+				rsp_i += rsp[rsp_i-1];
+				break;
+			case METADATA_ARTIST:
+				rsp[rsp_i++] = (uint8_t) METADATA_ARTIST &
+						0xFF00;
+				rsp[rsp_i++] = (uint8_t) METADATA_ARTIST &
+						0x00FF;
+				snprintf(metainfo, 65536, "%s", "Get artist from MPRIS");
+				rsp[rsp_i++] = strlen(metainfo);
+				memcpy(rsp + rsp_i, metainfo, rsp[rsp_i-1]);
+				rsp_i += rsp[rsp_i-1];
+				break;
+			case METADATA_ALBUM:
+				rsp[rsp_i++] = (uint8_t) METADATA_ALBUM &
+						0xFF00;
+				rsp[rsp_i++] = (uint8_t) METADATA_ALBUM &
+						0x00FF;
+				snprintf(metainfo, 65536, "%s", "Get album from MPRIS");
+				rsp[rsp_i++] = strlen(metainfo);
+				memcpy(rsp + rsp_i, metainfo, rsp[rsp_i-1]);
+				rsp_i += rsp[rsp_i-1];
+				break;
+			case METADATA_NUMBER:
+				rsp[rsp_i++] = (uint8_t) METADATA_NUMBER &
+						0xFF00;
+				rsp[rsp_i++] = (uint8_t) METADATA_NUMBER &
+						0x00FF;
+				snprintf(metainfo, 65536, "%s", "Get number from MPRIS");
+				rsp[rsp_i++] = strlen(metainfo);
+				memcpy(rsp + rsp_i, metainfo, rsp[rsp_i-1]);
+				rsp_i += rsp[rsp_i-1];
+				break;
+			case METADATA_TOTAL:
+				rsp[rsp_i++] = (uint8_t) METADATA_TOTAL &
+						0xFF00;
+				rsp[rsp_i++] = (uint8_t) METADATA_TOTAL &
+						0x00FF;
+				snprintf(metainfo, 65536, "%s", "Get total from MPRIS");
+				rsp[rsp_i++] = strlen(metainfo);
+				memcpy(rsp + rsp_i, metainfo, rsp[rsp_i-1]);
+				rsp_i += rsp[rsp_i-1];
+				break;
+			case METADATA_GENRE:
+				rsp[rsp_i++] = (uint8_t) METADATA_GENRE &
+						0xFF00;
+				rsp[rsp_i++] = (uint8_t) METADATA_GENRE &
+						0x00FF;
+				snprintf(metainfo, 65536, "%s", "Get genre from MPRIS");
+				rsp[rsp_i++] = strlen(metainfo);
+				memcpy(rsp + rsp_i, metainfo, rsp[rsp_i-1]);
+				rsp_i += rsp[rsp_i-1];
+				break;
+			case METADATA_PLAY_TIME:
+				rsp[rsp_i++] = (uint8_t) METADATA_PLAY_TIME &
+						0xFF00;
+				rsp[rsp_i++] = (uint8_t) METADATA_PLAY_TIME &
+						0x00FF;
+				snprintf(metainfo, 65536, "%s", "Get time from MPRIS");
+				rsp[rsp_i++] = strlen(metainfo);
+				memcpy(rsp + rsp_i, metainfo, rsp[rsp_i-1]);
+				rsp_i += rsp[rsp_i-1];
+				break;
+			default:
+				avrcp->code = CTYPE_REJECTED;
+				metadata->parameter_length = 1;
+				metadata_params[0] = E_INVALID_PARAM;
+				return;
+			}
+			rsp[rsp_i++] = (uint8_t) CHARSET_UTF8 & 0xFF00;
+			rsp[rsp_i++] = (uint8_t) CHARSET_UTF8 & 0x00FF;
+			/* Attribute value length (2 bytes) */
+			rsp[rsp_i++] = 0;
+			rsp[rsp_i++] = 0;
+			memcpy(metadata_params, rsp, rsp_i);
+		}
 	default:
 		avrcp->code = CTYPE_REJECTED;
 		metadata->parameter_length = 1;
 		metadata_params[0] = E_INVALID_COMMAND;
+		break;
 	}
 }
 
@@ -1527,6 +1654,26 @@ static DBusMessage *control_get_properties(DBusConnection *conn,
 	value = device->control->mpris_endless_state;
 	dict_append_entry(&dict, "EndlessState", DBUS_TYPE_BOOLEAN, &value);
 
+	/* MediaTitle */
+	dict_append_entry(&dict, "MediaTitle", DBUS_TYPE_STRING,
+				&device->control->mpris_title);
+	/* MediaArtist */
+	dict_append_entry(&dict, "MediaArtist", DBUS_TYPE_STRING,
+				&device->control->mpris_artist);
+	/* MediaAlbum */
+	dict_append_entry(&dict, "MediaAlbum", DBUS_TYPE_STRING,
+				&device->control->mpris_album);
+	/* MediaNumber */
+	dict_append_entry(&dict, "MediaNumber", DBUS_TYPE_STRING,
+				&device->control->mpris_number);
+	/* MediaGenre */
+	dict_append_entry(&dict, "MediaGenre", DBUS_TYPE_STRING,
+				&device->control->mpris_genre);
+
+	/* MediaLength */
+	dict_append_entry(&dict, "MediaLength", DBUS_TYPE_UINT32,
+				&device->control->mpris_total);
+
 	dbus_message_iter_close_container(&iter, &dict);
 
 	return reply;
@@ -1555,7 +1702,8 @@ static DBusMessage *control_set_property(DBusConnection *conn,
 	dbus_message_iter_recurse(&iter, &sub);
 
 	if (g_str_equal("PlayerCapabilities", property) ||
-			g_str_equal("PlayState", property)) {
+			g_str_equal("PlayState", property) ||
+			g_str_equal("MediaLength", property)) {
 		uint32_t value;
 
 		if (dbus_message_iter_get_arg_type(&sub) != DBUS_TYPE_UINT32)
@@ -1566,6 +1714,8 @@ static DBusMessage *control_set_property(DBusConnection *conn,
 			control->mpris_caps = value;
 		else if (g_str_equal("PlayState", property))
 			control->mpris_play_state = value;
+		else if (g_str_equal("MediaLength", property))
+			control->mpris_total = value;
 
 		emit_property_changed(conn, dbus_message_get_path(msg),
 					AUDIO_CONTROL_INTERFACE, property,
@@ -1592,6 +1742,42 @@ static DBusMessage *control_set_property(DBusConnection *conn,
 		emit_property_changed(conn, dbus_message_get_path(msg),
 					AUDIO_CONTROL_INTERFACE, property,
 					DBUS_TYPE_BOOLEAN, &value);
+
+		return dbus_message_new_method_return(msg);
+	} else if (g_str_equal("MediaTitle", property) ||
+			g_str_equal("MediaArtist", property) ||
+			g_str_equal("MediaAlbum", property) ||
+			g_str_equal("MediaNumber", property) ||
+			g_str_equal("MediaGenre", property)) {
+		const char *value;
+		int size;
+
+		if (dbus_message_iter_get_arg_type(&sub) != DBUS_TYPE_STRING)
+			return invalid_args(msg);
+
+		dbus_message_iter_get_basic(&sub, &value);
+		size = strlen(value) + 1;
+
+		if (g_str_equal("MediaTitle", property)) {
+			control->mpris_title = malloc(size * sizeof(char));
+			strncpy(control->mpris_title, value, size);
+		} else if (g_str_equal("MediaArtist", property)) {
+			control->mpris_artist = malloc(size * sizeof(char));
+			strncpy(control->mpris_artist, value, size);
+		} else if (g_str_equal("MediaAlbum", property)) {
+			control->mpris_album = malloc(size * sizeof(char));
+			strncpy(control->mpris_album, value, size);
+		} else if (g_str_equal("MediaNumber", property)) {
+			control->mpris_number = malloc(size * sizeof(char));
+			strncpy(control->mpris_number, value, size);
+		} else if (g_str_equal("MediaGenre", property)) {
+			control->mpris_genre = malloc(size * sizeof(char));
+			strncpy(control->mpris_genre, value, size);
+		}
+
+		emit_property_changed(conn, dbus_message_get_path(msg),
+					AUDIO_CONTROL_INTERFACE, property,
+					DBUS_TYPE_STRING, &value);
 
 		return dbus_message_new_method_return(msg);
 	}
