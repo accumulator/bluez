@@ -120,6 +120,10 @@
 #define LIST_PLAYER_SETTING_VALUES		0x12
 #define GET_CURRENT_PLAYER_SETTING_VALUE	0x13
 #define SET_PLAYER_SETTING_VALUE		0x14
+#define GET_PLAYER_SETTING_ATTRIBUTE_TEXT	0x15
+#define GET_PLAYER_SETTING_VALUE_TEXT		0x16
+#define INFORM_DISPLAYABLE_CHARSET		0x17
+#define INFORM_BATT_STATUS_OF_CT		0x18
 
 /* Capabilities */
 #define CAP_COMPANY_ID		0x2
@@ -872,6 +876,12 @@ static void handle_metadata_pdu(struct control *control,
 				break;
 			}
 		}
+		break;
+	case GET_PLAYER_SETTING_ATTRIBUTE_TEXT:
+	case GET_PLAYER_SETTING_VALUE_TEXT:
+	case INFORM_DISPLAYABLE_CHARSET:
+	case INFORM_BATT_STATUS_OF_CT:
+		avrcp->code = CTYPE_NOT_IMPLEMENTED;
 		break;
 	default:
 		avrcp->code = CTYPE_REJECTED;
