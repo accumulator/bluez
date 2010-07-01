@@ -119,6 +119,7 @@
 #define LIST_PLAYER_SETTING_ATTRIBUTES		0x11
 #define LIST_PLAYER_SETTING_VALUES		0x12
 #define GET_CURRENT_PLAYER_SETTING_VALUE	0x13
+#define SET_PLAYER_SETTING_VALUE		0x14
 
 /* Capabilities */
 #define CAP_COMPANY_ID		0x2
@@ -782,6 +783,95 @@ static void handle_metadata_pdu(struct control *control,
 			}
 		}
 		memcpy(metadata_params, rsp, rsp_i);
+		break;
+	case SET_PLAYER_SETTING_VALUE:
+		if (metadata->parameter_length < 1) {
+			avrcp->code = CTYPE_REJECTED;
+			metadata->parameter_length = 1;
+			metadata_params[0] = E_INVALID_PARAM;
+			break;
+		}
+		for (i = 0; i <= metadata_params[0]; i++) {
+			switch (metadata_params[2 * i + 1]) {
+			case ATTRIBUTE_REPEAT:
+				if (!(control->mpris_caps & MPRIS_CAN_REPEAT ||
+					control->mpris_caps & MPRIS_CAN_LOOP) ||
+					metadata_params[2 * i + 2] == ATTRIBUTE_REPEAT_ALL) {
+					i = metadata_params[0] + 1;
+					avrcp->code = CTYPE_REJECTED;
+					metadata->parameter_length = 1;
+					metadata_params[0] = E_INVALID_PARAM;
+					break;
+				}
+
+				if (metadata_params[2 * i + 2] == ATTRIBUTE_REPEAT_OFF) {
+					control->mpris_repeat_state = FALSE;
+					control->mpris_endless_state = FALSE;
+				} else if (metadata_params[2 * i + 2] == ATTRIBUTE_REPEAT_SINGLE) {
+					control->mpris_repeat_state = TRUE;
+					control->mpris_endless_state = FALSE;
+				} else if (metadata_params[2 * i + 2] == ATTRIBUTE_REPEAT_GROUP) {
+					control->mpris_repeat_state = FALSE;
+					control->mpris_endless_state = TRUE;
+				}
+
+				/* is uinput better appropriate for this? */
+				emit_property_changed(control->dev->conn,
+					control->dev->path,
+					AUDIO_CONTROL_INTERFACE,
+					"SetRepeatState",
+					DBUS_TYPE_BOOLEAN,
+					&metadata_params[2 * i + 2]);
+
+				DBG("repeat 0x%1X", metadata_params[2 * i + 2]);
+
+				break;
+
+			case ATTRIBUTE_SHUFFLE:
+				if (!(control->mpris_caps & MPRIS_CAN_SHUFFLE)) {
+					i = metadata_params[0] + 1;
+					avrcp->code = CTYPE_REJECTED;
+					metadata->parameter_length = 1;
+					metadata_params[0] = E_INVALID_PARAM;
+					break;
+				}
+
+				if (metadata_params[2 * i + 2] == ATTRIBUTE_SHUFFLE_OFF)
+					control->mpris_shuffle_state = FALSE;
+				else if (metadata_params[2 * i + 2] == ATTRIBUTE_SHUFFLE_GROUP)
+					control->mpris_shuffle_state = TRUE;
+
+				/* is uinput better appropriate for this? */
+				emit_property_changed(control->dev->conn,
+					control->dev->path,
+					AUDIO_CONTROL_INTERFACE,
+					"SetShuffleState",
+					DBUS_TYPE_BOOLEAN,
+					&metadata_params[2 * i + 2]);
+
+				DBG("shuffle 0x%1X", metadata_params[2 * i + 2]);
+
+				break;
+
+			case ATTRIBUTE_SCAN:
+				if (!(control->mpris_caps & MPRIS_CAN_SCAN)) {
+					i = metadata_params[0] + 1;
+					avrcp->code = CTYPE_REJECTED;
+					metadata->parameter_length = 1;
+					metadata_params[0] = E_INVALID_PARAM;
+					break;
+				}
+				/* not supported on MPRIS 1.0 */
+				DBG("scan 0x%1X", metadata_params[2 * i + 2]);
+				break;
+			default:
+				i = metadata_params[0] + 1;
+				avrcp->code = CTYPE_REJECTED;
+				metadata->parameter_length = 1;
+				metadata_params[0] = E_INVALID_PARAM;
+				break;
+			}
+		}
 		break;
 	default:
 		avrcp->code = CTYPE_REJECTED;
@@ -1513,6 +1603,9 @@ static GDBusSignalTable control_signals[] = {
 	{ "Connected",			"",	G_DBUS_SIGNAL_FLAG_DEPRECATED},
 	{ "Disconnected",		"",	G_DBUS_SIGNAL_FLAG_DEPRECATED},
 	{ "PropertyChanged",		"sv"	},
+	{ "SetRepeatState",		"b"	},
+	{ "SetShuffleState",		"b"	},
+	{ "SetScanState",		"b"	},
 	{ NULL, NULL }
 };
 
