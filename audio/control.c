@@ -125,6 +125,7 @@
 #define INFORM_DISPLAYABLE_CHARSET		0x17
 #define INFORM_BATT_STATUS_OF_CT		0x18
 #define GET_ELEMENT_ATTRIBUTES			0x20
+#define GET_PLAY_STATUS				0x30
 
 /* Capabilities */
 #define CAP_COMPANY_ID		0x2
@@ -163,6 +164,14 @@
 #define METADATA_TOTAL		0x5
 #define METADATA_GENRE		0x6
 #define METADATA_PLAY_TIME	0x7
+
+/* Play status */
+#define PLAY_STOPPED		0x00
+#define PLAY_PLAYING		0x01
+#define PLAY_PAUSED		0x02
+#define PLAY_FWDSEEK		0x03
+#define PLAY_REVSEEK		0x04
+#define PLAY_ERROR		0xFF
 
 /* Character sets */
 #define CHARSET_UTF8		0x6A
@@ -1009,6 +1018,13 @@ static void handle_metadata_pdu(struct control *control,
 			rsp[rsp_i++] = 0;
 			memcpy(metadata_params, rsp, rsp_i);
 		}
+	case GET_PLAY_STATUS:
+		avrcp->code = CTYPE_STABLE;
+		/* get song length, position and player status from MPRIS */
+		for (i = 0; i < 8; i++)
+			metadata_params[i] = 0xFF;
+		metadata_params[8] = PLAY_STOPPED;
+		break;
 	default:
 		avrcp->code = CTYPE_REJECTED;
 		metadata->parameter_length = 1;
