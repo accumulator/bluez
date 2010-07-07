@@ -117,6 +117,7 @@
 /* PDU types for metadata transfer */
 #define GET_CAPABILITIES		0x10
 #define LIST_PLAYER_SETTING_ATTRIBUTES	0x11
+#define LIST_PLAYER_SETTING_VALUES	0x12
 
 /* Capabilities */
 #define CAP_COMPANY_ID		0x2
@@ -634,6 +635,76 @@ static void handle_metadata_pdu(struct control *control,
 			metadata->parameter_length++;
 			metadata_params[0]++;
 			metadata_params[metadata_params[0]] = ATTRIBUTE_SCAN;
+		}
+		break;
+	case LIST_PLAYER_SETTING_VALUES:
+		if (metadata->parameter_length < 1) {
+			avrcp->code = CTYPE_REJECTED;
+			metadata->parameter_length = 1;
+			metadata_params[0] = E_INVALID_PARAM;
+			break;
+		}
+
+		avrcp->code = CTYPE_STABLE;
+		switch (metadata_params[0]) {
+		case ATTRIBUTE_REPEAT:
+			if (!(control->mpris_caps & MPRIS_CAN_REPEAT ||
+				control->mpris_caps & MPRIS_CAN_LOOP)) {
+				avrcp->code = CTYPE_REJECTED;
+				metadata->parameter_length = 1;
+				metadata_params[0] = E_INVALID_PARAM;
+				break;
+			}
+			metadata->parameter_length = 2;
+			metadata_params[0] = 1; /* num player setting values */
+			metadata_params[1] = ATTRIBUTE_REPEAT_OFF;
+			if (control->mpris_caps & MPRIS_CAN_REPEAT) {
+				metadata->parameter_length++;
+				metadata_params[0]++;
+				metadata_params[metadata_params[0]] =
+					ATTRIBUTE_REPEAT_SINGLE;
+			}
+			if (control->mpris_caps & MPRIS_CAN_LOOP) {
+				metadata->parameter_length++;
+				metadata_params[0]++;
+				metadata_params[metadata_params[0]] =
+					ATTRIBUTE_REPEAT_GROUP;
+				/* AVRCP spec is not clear if ALL is refers
+				 * to the playlist or to the media colection.
+				 * For MPRIS CAN_LOOP refers to the playlist. */
+			}
+			break;
+		case ATTRIBUTE_SHUFFLE:
+			if (!(control->mpris_caps & MPRIS_CAN_SHUFFLE)) {
+				avrcp->code = CTYPE_REJECTED;
+				metadata->parameter_length = 1;
+				metadata_params[0] = E_INVALID_PARAM;
+				break;
+			}
+			metadata->parameter_length = 3;
+			metadata_params[0] = 2; /* num player setting values */
+			metadata_params[1] = ATTRIBUTE_SHUFFLE_OFF;
+			metadata_params[2] = ATTRIBUTE_SHUFFLE_GROUP;
+			/* same note for REPEAT_GROUP applies here */
+			break;
+		case ATTRIBUTE_SCAN:
+			if (!(control->mpris_caps & MPRIS_CAN_SCAN)) {
+				avrcp->code = CTYPE_REJECTED;
+				metadata->parameter_length = 1;
+				metadata_params[0] = E_INVALID_PARAM;
+				break;
+			}
+			metadata->parameter_length = 3;
+			metadata_params[0] = 2; /* num player setting values */
+			metadata_params[1] = ATTRIBUTE_SCAN_OFF;
+			metadata_params[2] = ATTRIBUTE_SCAN_GROUP;
+			/* same note for REPEAT_GROUP applies here */
+			break;
+		default:
+			avrcp->code = CTYPE_REJECTED;
+			metadata->parameter_length = 1;
+			metadata_params[0] = E_INVALID_PARAM;
+			break;
 		}
 		break;
 	default:
