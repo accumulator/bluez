@@ -115,9 +115,10 @@
 #define E_INTERNAL		0x03
 
 /* PDU types for metadata transfer */
-#define GET_CAPABILITIES		0x10
-#define LIST_PLAYER_SETTING_ATTRIBUTES	0x11
-#define LIST_PLAYER_SETTING_VALUES	0x12
+#define GET_CAPABILITIES			0x10
+#define LIST_PLAYER_SETTING_ATTRIBUTES		0x11
+#define LIST_PLAYER_SETTING_VALUES		0x12
+#define GET_CURRENT_PLAYER_SETTING_VALUE	0x13
 
 /* Capabilities */
 #define CAP_COMPANY_ID		0x2
@@ -254,6 +255,10 @@ struct control {
 	uint8_t key_quirks[256];
 
 	uint32_t mpris_caps;
+	gboolean mpris_play_state;
+	gboolean mpris_shuffle_state;
+	gboolean mpris_repeat_state;
+	gboolean mpris_endless_state;
 };
 
 static struct {
@@ -570,8 +575,11 @@ static void avctp_set_state(struct control *control, avctp_state_t new_state)
 static void handle_metadata_pdu(struct control *control,
 				struct avrcp_header *avrcp, int operand_count)
 {
+	uint8_t i, rsp_i = 0;
+	size_t metadata_length = operand_count - 3;
+	size_t params_count = metadata_length - METADATA_HEADER_LENGTH;
 	struct metadata_header *metadata;
-	uint8_t *metadata_params;
+	uint8_t *metadata_params, rsp[params_count];
 
 	metadata = (struct metadata_header *) avrcp + AVRCP_HEADER_LENGTH + 3;
 	metadata_params = (unsigned char *) metadata + METADATA_HEADER_LENGTH;
@@ -706,6 +714,74 @@ static void handle_metadata_pdu(struct control *control,
 			metadata_params[0] = E_INVALID_PARAM;
 			break;
 		}
+		break;
+	case GET_CURRENT_PLAYER_SETTING_VALUE:
+		if (metadata->parameter_length < 1) {
+			avrcp->code = CTYPE_REJECTED;
+			metadata->parameter_length = 1;
+			metadata_params[0] = E_INVALID_PARAM;
+			break;
+		}
+
+		avrcp->code = CTYPE_STABLE;
+		metadata->parameter_length = 1;
+		rsp[0] = metadata_params[0];
+		rsp_i = 1;
+
+		for (i = 1; i <= metadata_params[0]; i++) {
+			switch (metadata_params[i]) {
+			case ATTRIBUTE_REPEAT:
+				if (!(control->mpris_caps & MPRIS_CAN_REPEAT ||
+					control->mpris_caps & MPRIS_CAN_LOOP)) {
+					i = metadata_params[0] + 1;
+					avrcp->code = CTYPE_REJECTED;
+					metadata->parameter_length = 1;
+					metadata_params[0] = E_INVALID_PARAM;
+					break;
+				}
+				rsp[rsp_i++] = ATTRIBUTE_REPEAT;
+				if (control->mpris_repeat_state)
+					rsp[rsp_i++] = ATTRIBUTE_REPEAT_SINGLE;
+				else if (control->mpris_endless_state)
+					rsp[rsp_i++] = ATTRIBUTE_REPEAT_GROUP;
+				else
+					rsp[rsp_i++] = ATTRIBUTE_REPEAT_OFF;
+				break;
+			case ATTRIBUTE_SHUFFLE:
+				if (!(control->mpris_caps & MPRIS_CAN_SHUFFLE)) {
+					i = metadata_params[0] + 1;
+					avrcp->code = CTYPE_REJECTED;
+					metadata->parameter_length = 1;
+					metadata_params[0] = E_INVALID_PARAM;
+					break;
+				}
+				rsp[rsp_i++] = ATTRIBUTE_SHUFFLE;
+				if (control->mpris_shuffle_state)
+					rsp[rsp_i++] = ATTRIBUTE_SHUFFLE_GROUP;
+				else
+					rsp[rsp_i++] = ATTRIBUTE_SHUFFLE_OFF;
+				break;
+			case ATTRIBUTE_SCAN:
+				if (!(control->mpris_caps & MPRIS_CAN_SCAN)) {
+					i = metadata_params[0] + 1;
+					avrcp->code = CTYPE_REJECTED;
+					metadata->parameter_length = 1;
+					metadata_params[0] = E_INVALID_PARAM;
+					break;
+				}
+				/* not supported on MPRIS 1.0 */
+				rsp[rsp_i++] = ATTRIBUTE_SCAN;
+				rsp[rsp_i++] = ATTRIBUTE_SCAN_OFF;
+				break;
+			default:
+				i = metadata_params[0] + 1;
+				avrcp->code = CTYPE_REJECTED;
+				metadata->parameter_length = 1;
+				metadata_params[0] = E_INVALID_PARAM;
+				break;
+			}
+		}
+		memcpy(metadata_params, rsp, rsp_i);
 		break;
 	default:
 		avrcp->code = CTYPE_REJECTED;
@@ -1335,6 +1411,22 @@ static DBusMessage *control_get_properties(DBusConnection *conn,
 	value = device->control->mpris_caps;
 	dict_append_entry(&dict, "PlayerCapabilities", DBUS_TYPE_UINT32, &value);
 
+	/* PlayState */
+	value = device->control->mpris_play_state;
+	dict_append_entry(&dict, "PlayState", DBUS_TYPE_UINT32, &value);
+
+	/* ShuffleState */
+	value = device->control->mpris_shuffle_state;
+	dict_append_entry(&dict, "ShuffleState", DBUS_TYPE_BOOLEAN, &value);
+
+	/* RepeatState */
+	value = device->control->mpris_repeat_state;
+	dict_append_entry(&dict, "RepeatState", DBUS_TYPE_BOOLEAN, &value);
+
+	/* EndlessState */
+	value = device->control->mpris_endless_state;
+	dict_append_entry(&dict, "EndlessState", DBUS_TYPE_BOOLEAN, &value);
+
 	dbus_message_iter_close_container(&iter, &dict);
 
 	return reply;
@@ -1362,18 +1454,44 @@ static DBusMessage *control_set_property(DBusConnection *conn,
 		return invalid_args(msg);
 	dbus_message_iter_recurse(&iter, &sub);
 
-	if (g_str_equal("PlayerCapabilities", property)) {
+	if (g_str_equal("PlayerCapabilities", property) ||
+			g_str_equal("PlayState", property)) {
 		uint32_t value;
 
 		if (dbus_message_iter_get_arg_type(&sub) != DBUS_TYPE_UINT32)
 			return invalid_args(msg);
 		dbus_message_iter_get_basic(&sub, &value);
 
-		control->mpris_caps = value;
+		if (g_str_equal("PlayerCapabilities", property))
+			control->mpris_caps = value;
+		else if (g_str_equal("PlayState", property))
+			control->mpris_play_state = value;
 
 		emit_property_changed(conn, dbus_message_get_path(msg),
 					AUDIO_CONTROL_INTERFACE, property,
 					DBUS_TYPE_UINT32, &value);
+
+		return dbus_message_new_method_return(msg);
+
+	} else if (g_str_equal("ShuffleState", property) ||
+			g_str_equal("RepeatState", property) ||
+			g_str_equal("EndlessState", property)) {
+		gboolean value;
+
+		if (dbus_message_iter_get_arg_type(&sub) != DBUS_TYPE_BOOLEAN)
+			return invalid_args(msg);
+		dbus_message_iter_get_basic(&sub, &value);
+
+		if (g_str_equal("ShuffleState", property))
+			control->mpris_shuffle_state = value;
+		else if (g_str_equal("RepeatState", property))
+			control->mpris_repeat_state = value;
+		else if (g_str_equal("EndlessState", property))
+			control->mpris_endless_state = value;
+
+		emit_property_changed(conn, dbus_message_get_path(msg),
+					AUDIO_CONTROL_INTERFACE, property,
+					DBUS_TYPE_BOOLEAN, &value);
 
 		return dbus_message_new_method_return(msg);
 	}
