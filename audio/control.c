@@ -81,6 +81,7 @@
 #define CTYPE_STABLE		0xC
 
 /* opcodes */
+#define OP_VENDORDEPENDENT	0x00
 #define OP_UNITINFO		0x30
 #define OP_SUBUNITINFO		0x31
 #define OP_PASSTHROUGH		0x7c
@@ -103,6 +104,93 @@
 #define BACKWARD_OP		0x4c
 
 #define QUIRK_NO_RELEASE	1 << 0
+
+/* Company IDs for vendor dependent commands */
+#define IEEEID_BTSIG		0x001958
+
+/* Error codes */
+#define E_INVALID_COMMAND	0x00
+#define E_INVALID_PARAM		0x01
+#define E_PARAM_NOT_FOUND	0x02
+#define E_INTERNAL		0x03
+
+/* PDU types for metadata transfer */
+#define GET_CAPABILITIES			0x10
+#define LIST_PLAYER_SETTING_ATTRIBUTES		0x11
+#define LIST_PLAYER_SETTING_VALUES		0x12
+#define GET_CURRENT_PLAYER_SETTING_VALUE	0x13
+#define SET_PLAYER_SETTING_VALUE		0x14
+#define GET_PLAYER_SETTING_ATTRIBUTE_TEXT	0x15
+#define GET_PLAYER_SETTING_VALUE_TEXT		0x16
+#define INFORM_DISPLAYABLE_CHARSET		0x17
+#define INFORM_BATT_STATUS_OF_CT		0x18
+#define GET_ELEMENT_ATTRIBUTES			0x20
+#define GET_PLAY_STATUS				0x30
+
+/* Capabilities */
+#define CAP_COMPANY_ID		0x2
+#define CAP_EVENTS_SUPPORTED	0x3
+
+/* Player setting attribute IDs */
+#define ATTRIBUTE_ILLEGAL	0x0
+#define ATTRIBUTE_EQUALIZER	0x1
+#define ATTRIBUTE_REPEAT	0x2
+#define ATTRIBUTE_SHUFFLE	0x3
+#define ATTRIBUTE_SCAN		0x4
+
+/* Player setting attribute values */
+#define ATTRIBUTE_EQUALIZER_OFF	0x1
+#define ATTRIBUTE_EQUALIZER_ON	0x2
+#define ATTRIBUTE_REPEAT_OFF	0x1
+#define ATTRIBUTE_REPEAT_SINGLE	0x2
+#define ATTRIBUTE_REPEAT_ALL	0x3
+#define ATTRIBUTE_REPEAT_GROUP	0x4
+#define ATTRIBUTE_SHUFFLE_OFF	0x1
+#define ATTRIBUTE_SHUFFLE_ALL	0x2
+#define ATTRIBUTE_SHUFFLE_GROUP	0x3
+#define ATTRIBUTE_SCAN_OFF	0x1
+#define ATTRIBUTE_SCAN_ALL	0x2
+#define ATTRIBUTE_SCAN_GROUP	0x3
+
+/* Element IDs */
+#define ELEMENT_PLAYING		0x0000
+
+/* Metadata attributes */
+#define METADATA_ILLEGAL	0x0
+#define METADATA_TITLE		0x1
+#define METADATA_ARTIST		0x2
+#define METADATA_ALBUM		0x3
+#define METADATA_NUMBER		0x4
+#define METADATA_TOTAL		0x5
+#define METADATA_GENRE		0x6
+#define METADATA_PLAY_TIME	0x7
+
+/* Play status */
+#define PLAY_STOPPED		0x00
+#define PLAY_PLAYING		0x01
+#define PLAY_PAUSED		0x02
+#define PLAY_FWDSEEK		0x03
+#define PLAY_REVSEEK		0x04
+#define PLAY_ERROR		0xFF
+
+/* Character sets */
+#define CHARSET_UTF8		0x6A
+
+/* Metadata transfer events */
+#define EVENT_PLAYBACK_STATUS_CHANGED	0x01
+#define EVENT_TRACK_CHANGED		0x02
+#define EVENT_TRACK_REACHED_END		0x03
+#define EVENT_TRACK_REACHED_START	0x04
+#define EVENT_PLAYBACK_POS_CHANGED	0x05
+#define EVENT_BATT_STATUS_CHANGED	0x06
+#define EVENT_SYSTEM_STATUS_CHANGED	0x07
+#define EVENT_PLAYER_SETTING_CHANGED	0x08
+
+/* MPRIS player capabilities */
+#define MPRIS_CAN_REPEAT	1 << 7
+#define MPRIS_CAN_LOOP		1 << 8
+#define MPRIS_CAN_SHUFFLE	1 << 9
+#define MPRIS_CAN_SCAN		1 << 10
 
 static DBusConnection *connection = NULL;
 
@@ -128,6 +216,14 @@ struct avrcp_header {
 } __attribute__ ((packed));
 #define AVRCP_HEADER_LENGTH 3
 
+struct metadata_header {
+	int8_t pdu_id;
+	uint8_t packet_type:2;
+	int8_t _rfa:6;
+	uint16_t parameter_length;
+} __attribute__ ((packed));
+#define METADATA_HEADER_LENGTH 4
+
 #elif __BYTE_ORDER == __BIG_ENDIAN
 
 struct avctp_header {
@@ -147,6 +243,14 @@ struct avrcp_header {
 	uint8_t opcode;
 } __attribute__ ((packed));
 #define AVRCP_HEADER_LENGTH 3
+
+struct metadata_header {
+	int8_t pdu_id;
+	int8_t _rfa:6;
+	uint8_t packet_type:2;
+	uint16_t parameter_length;
+} __attribute__ ((packed));
+#define METADATA_HEADER_LENGTH 4
 
 #else
 #error "Unknown byte order"
@@ -180,6 +284,19 @@ struct control {
 	gboolean target;
 
 	uint8_t key_quirks[256];
+
+	uint32_t mpris_caps;
+	gboolean mpris_play_state;
+	gboolean mpris_shuffle_state;
+	gboolean mpris_repeat_state;
+	gboolean mpris_endless_state;
+
+	char *mpris_title;
+	char *mpris_artist;
+	char *mpris_album;
+	char *mpris_number;
+	char *mpris_genre;
+	uint32_t mpris_total;
 };
 
 static struct {
@@ -200,6 +317,12 @@ static struct {
 static GSList *avctp_callbacks = NULL;
 
 static void auth_cb(DBusError *derr, void *user_data);
+
+static inline DBusMessage *invalid_args(DBusMessage *msg)
+{
+	return g_dbus_create_error(msg, ERROR_INTERFACE ".InvalidArguments",
+			"Invalid arguments in method call");
+}
 
 static sdp_record_t *avrcp_ct_record()
 {
@@ -487,6 +610,429 @@ static void avctp_set_state(struct control *control, avctp_state_t new_state)
 	}
 }
 
+static void handle_metadata_pdu(struct control *control,
+				struct avrcp_header *avrcp, int operand_count)
+{
+	uint8_t i, rsp_i = 0;
+	size_t metadata_length = operand_count - 3;
+	size_t params_count = metadata_length - METADATA_HEADER_LENGTH;
+	struct metadata_header *metadata;
+	uint8_t *metadata_params, rsp[params_count];
+	uint32_t element_id;
+
+	metadata = (struct metadata_header *) avrcp + AVRCP_HEADER_LENGTH + 3;
+	metadata_params = (unsigned char *) metadata + METADATA_HEADER_LENGTH;
+
+	/* metadata segmentation */
+	if (metadata->packet_type != AVCTP_PACKET_SINGLE) {
+		avrcp->code = CTYPE_NOT_IMPLEMENTED;
+		return;
+	}
+
+	switch (metadata->pdu_id) {
+	case GET_CAPABILITIES:
+		if (metadata->parameter_length < 1) {
+			avrcp->code = CTYPE_REJECTED;
+			metadata->parameter_length = 1;
+			metadata_params[0] = E_INVALID_PARAM;
+			break;
+		}
+
+		switch(metadata_params[0]) { /* capability id */
+		case CAP_COMPANY_ID:
+			avrcp->code = CTYPE_STABLE;
+			metadata->parameter_length = 5;
+			metadata_params[1] = 1; /* capability count */
+			metadata_params[2] = (uint8_t) IEEEID_BTSIG & 0xFF0000;
+			metadata_params[3] = (uint8_t) IEEEID_BTSIG & 0x00FF00;
+			metadata_params[4] = IEEEID_BTSIG & 0x0000FF;
+			break;
+		case CAP_EVENTS_SUPPORTED:
+			avrcp->code = CTYPE_STABLE;
+			metadata->parameter_length = 5;
+			metadata_params[1] = 3; /* capability count */
+			metadata_params[2] = EVENT_PLAYBACK_STATUS_CHANGED;
+			metadata_params[3] = EVENT_TRACK_CHANGED;
+			metadata_params[4] = EVENT_TRACK_REACHED_END;
+			break;
+		default:
+			avrcp->code = CTYPE_REJECTED;
+			metadata->parameter_length = 1;
+			metadata_params[0] = E_INVALID_PARAM;
+			break;
+		}
+		break;
+	case LIST_PLAYER_SETTING_ATTRIBUTES:
+		avrcp->code = CTYPE_STABLE;
+
+		metadata->parameter_length = 1;
+		metadata_params[0] = 0; /* num player setting attributes */
+		if (control->mpris_caps & MPRIS_CAN_REPEAT ||
+			control->mpris_caps & MPRIS_CAN_LOOP) {
+			metadata->parameter_length++;
+			metadata_params[0]++;
+			metadata_params[metadata_params[0]] = ATTRIBUTE_REPEAT;
+		}
+		if (control->mpris_caps & MPRIS_CAN_SHUFFLE) {
+			metadata->parameter_length++;
+			metadata_params[0]++;
+			metadata_params[metadata_params[0]] = ATTRIBUTE_SHUFFLE;
+		}
+		if (control->mpris_caps & MPRIS_CAN_SCAN) {
+			metadata->parameter_length++;
+			metadata_params[0]++;
+			metadata_params[metadata_params[0]] = ATTRIBUTE_SCAN;
+		}
+		break;
+	case LIST_PLAYER_SETTING_VALUES:
+		if (metadata->parameter_length < 1) {
+			avrcp->code = CTYPE_REJECTED;
+			metadata->parameter_length = 1;
+			metadata_params[0] = E_INVALID_PARAM;
+			break;
+		}
+
+		avrcp->code = CTYPE_STABLE;
+		switch (metadata_params[0]) {
+		case ATTRIBUTE_REPEAT:
+			if (!(control->mpris_caps & MPRIS_CAN_REPEAT ||
+				control->mpris_caps & MPRIS_CAN_LOOP)) {
+				avrcp->code = CTYPE_REJECTED;
+				metadata->parameter_length = 1;
+				metadata_params[0] = E_INVALID_PARAM;
+				break;
+			}
+			metadata->parameter_length = 2;
+			metadata_params[0] = 1; /* num player setting values */
+			metadata_params[1] = ATTRIBUTE_REPEAT_OFF;
+			if (control->mpris_caps & MPRIS_CAN_REPEAT) {
+				metadata->parameter_length++;
+				metadata_params[0]++;
+				metadata_params[metadata_params[0]] =
+					ATTRIBUTE_REPEAT_SINGLE;
+			}
+			if (control->mpris_caps & MPRIS_CAN_LOOP) {
+				metadata->parameter_length++;
+				metadata_params[0]++;
+				metadata_params[metadata_params[0]] =
+					ATTRIBUTE_REPEAT_GROUP;
+				/* AVRCP spec is not clear if ALL is refers
+				 * to the playlist or to the media colection.
+				 * For MPRIS CAN_LOOP refers to the playlist. */
+			}
+			break;
+		case ATTRIBUTE_SHUFFLE:
+			if (!(control->mpris_caps & MPRIS_CAN_SHUFFLE)) {
+				avrcp->code = CTYPE_REJECTED;
+				metadata->parameter_length = 1;
+				metadata_params[0] = E_INVALID_PARAM;
+				break;
+			}
+			metadata->parameter_length = 3;
+			metadata_params[0] = 2; /* num player setting values */
+			metadata_params[1] = ATTRIBUTE_SHUFFLE_OFF;
+			metadata_params[2] = ATTRIBUTE_SHUFFLE_GROUP;
+			/* same note for REPEAT_GROUP applies here */
+			break;
+		case ATTRIBUTE_SCAN:
+			if (!(control->mpris_caps & MPRIS_CAN_SCAN)) {
+				avrcp->code = CTYPE_REJECTED;
+				metadata->parameter_length = 1;
+				metadata_params[0] = E_INVALID_PARAM;
+				break;
+			}
+			metadata->parameter_length = 3;
+			metadata_params[0] = 2; /* num player setting values */
+			metadata_params[1] = ATTRIBUTE_SCAN_OFF;
+			metadata_params[2] = ATTRIBUTE_SCAN_GROUP;
+			/* same note for REPEAT_GROUP applies here */
+			break;
+		default:
+			avrcp->code = CTYPE_REJECTED;
+			metadata->parameter_length = 1;
+			metadata_params[0] = E_INVALID_PARAM;
+			break;
+		}
+		break;
+	case GET_CURRENT_PLAYER_SETTING_VALUE:
+		if (metadata->parameter_length < 1) {
+			avrcp->code = CTYPE_REJECTED;
+			metadata->parameter_length = 1;
+			metadata_params[0] = E_INVALID_PARAM;
+			break;
+		}
+
+		avrcp->code = CTYPE_STABLE;
+		metadata->parameter_length = 1;
+		rsp[0] = metadata_params[0];
+		rsp_i = 1;
+
+		for (i = 1; i <= metadata_params[0]; i++) {
+			switch (metadata_params[i]) {
+			case ATTRIBUTE_REPEAT:
+				if (!(control->mpris_caps & MPRIS_CAN_REPEAT ||
+					control->mpris_caps & MPRIS_CAN_LOOP)) {
+					i = metadata_params[0] + 1;
+					avrcp->code = CTYPE_REJECTED;
+					metadata->parameter_length = 1;
+					metadata_params[0] = E_INVALID_PARAM;
+					break;
+				}
+				rsp[rsp_i++] = ATTRIBUTE_REPEAT;
+				if (control->mpris_repeat_state)
+					rsp[rsp_i++] = ATTRIBUTE_REPEAT_SINGLE;
+				else if (control->mpris_endless_state)
+					rsp[rsp_i++] = ATTRIBUTE_REPEAT_GROUP;
+				else
+					rsp[rsp_i++] = ATTRIBUTE_REPEAT_OFF;
+				break;
+			case ATTRIBUTE_SHUFFLE:
+				if (!(control->mpris_caps & MPRIS_CAN_SHUFFLE)) {
+					i = metadata_params[0] + 1;
+					avrcp->code = CTYPE_REJECTED;
+					metadata->parameter_length = 1;
+					metadata_params[0] = E_INVALID_PARAM;
+					break;
+				}
+				rsp[rsp_i++] = ATTRIBUTE_SHUFFLE;
+				if (control->mpris_shuffle_state)
+					rsp[rsp_i++] = ATTRIBUTE_SHUFFLE_GROUP;
+				else
+					rsp[rsp_i++] = ATTRIBUTE_SHUFFLE_OFF;
+				break;
+			case ATTRIBUTE_SCAN:
+				if (!(control->mpris_caps & MPRIS_CAN_SCAN)) {
+					i = metadata_params[0] + 1;
+					avrcp->code = CTYPE_REJECTED;
+					metadata->parameter_length = 1;
+					metadata_params[0] = E_INVALID_PARAM;
+					break;
+				}
+				/* not supported on MPRIS 1.0 */
+				rsp[rsp_i++] = ATTRIBUTE_SCAN;
+				rsp[rsp_i++] = ATTRIBUTE_SCAN_OFF;
+				break;
+			default:
+				i = metadata_params[0] + 1;
+				avrcp->code = CTYPE_REJECTED;
+				metadata->parameter_length = 1;
+				metadata_params[0] = E_INVALID_PARAM;
+				break;
+			}
+		}
+		memcpy(metadata_params, rsp, rsp_i);
+		break;
+	case SET_PLAYER_SETTING_VALUE:
+		if (metadata->parameter_length < 1) {
+			avrcp->code = CTYPE_REJECTED;
+			metadata->parameter_length = 1;
+			metadata_params[0] = E_INVALID_PARAM;
+			break;
+		}
+		for (i = 0; i <= metadata_params[0]; i++) {
+			switch (metadata_params[2 * i + 1]) {
+			case ATTRIBUTE_REPEAT:
+				if (!(control->mpris_caps & MPRIS_CAN_REPEAT ||
+					control->mpris_caps & MPRIS_CAN_LOOP) ||
+					metadata_params[2 * i + 2] == ATTRIBUTE_REPEAT_ALL) {
+					i = metadata_params[0] + 1;
+					avrcp->code = CTYPE_REJECTED;
+					metadata->parameter_length = 1;
+					metadata_params[0] = E_INVALID_PARAM;
+					break;
+				}
+
+				if (metadata_params[2 * i + 2] == ATTRIBUTE_REPEAT_OFF) {
+					control->mpris_repeat_state = FALSE;
+					control->mpris_endless_state = FALSE;
+				} else if (metadata_params[2 * i + 2] == ATTRIBUTE_REPEAT_SINGLE) {
+					control->mpris_repeat_state = TRUE;
+					control->mpris_endless_state = FALSE;
+				} else if (metadata_params[2 * i + 2] == ATTRIBUTE_REPEAT_GROUP) {
+					control->mpris_repeat_state = FALSE;
+					control->mpris_endless_state = TRUE;
+				}
+
+				/* is uinput better appropriate for this? */
+				emit_property_changed(control->dev->conn,
+					control->dev->path,
+					AUDIO_CONTROL_INTERFACE,
+					"SetRepeatState",
+					DBUS_TYPE_BOOLEAN,
+					&metadata_params[2 * i + 2]);
+
+				DBG("repeat 0x%1X", metadata_params[2 * i + 2]);
+
+				break;
+
+			case ATTRIBUTE_SHUFFLE:
+				if (!(control->mpris_caps & MPRIS_CAN_SHUFFLE)) {
+					i = metadata_params[0] + 1;
+					avrcp->code = CTYPE_REJECTED;
+					metadata->parameter_length = 1;
+					metadata_params[0] = E_INVALID_PARAM;
+					break;
+				}
+
+				if (metadata_params[2 * i + 2] == ATTRIBUTE_SHUFFLE_OFF)
+					control->mpris_shuffle_state = FALSE;
+				else if (metadata_params[2 * i + 2] == ATTRIBUTE_SHUFFLE_GROUP)
+					control->mpris_shuffle_state = TRUE;
+
+				/* is uinput better appropriate for this? */
+				emit_property_changed(control->dev->conn,
+					control->dev->path,
+					AUDIO_CONTROL_INTERFACE,
+					"SetShuffleState",
+					DBUS_TYPE_BOOLEAN,
+					&metadata_params[2 * i + 2]);
+
+				DBG("shuffle 0x%1X", metadata_params[2 * i + 2]);
+
+				break;
+
+			case ATTRIBUTE_SCAN:
+				if (!(control->mpris_caps & MPRIS_CAN_SCAN)) {
+					i = metadata_params[0] + 1;
+					avrcp->code = CTYPE_REJECTED;
+					metadata->parameter_length = 1;
+					metadata_params[0] = E_INVALID_PARAM;
+					break;
+				}
+				/* not supported on MPRIS 1.0 */
+				DBG("scan 0x%1X", metadata_params[2 * i + 2]);
+				break;
+			default:
+				i = metadata_params[0] + 1;
+				avrcp->code = CTYPE_REJECTED;
+				metadata->parameter_length = 1;
+				metadata_params[0] = E_INVALID_PARAM;
+				break;
+			}
+		}
+		break;
+	case GET_PLAYER_SETTING_ATTRIBUTE_TEXT:
+	case GET_PLAYER_SETTING_VALUE_TEXT:
+	case INFORM_DISPLAYABLE_CHARSET:
+	case INFORM_BATT_STATUS_OF_CT:
+		avrcp->code = CTYPE_NOT_IMPLEMENTED;
+		break;
+	case GET_ELEMENT_ATTRIBUTES:
+		element_id = (metadata_params[0] << 24) |
+				(metadata_params[1] << 16) |
+				(metadata_params[2] << 8) |
+				metadata_params[3];
+		if (element_id != ELEMENT_PLAYING) {
+			avrcp->code = CTYPE_REJECTED;
+			metadata->parameter_length = 1;
+			metadata_params[0] = E_INVALID_PARAM;
+			break;
+		}
+		avrcp->code = CTYPE_STABLE;
+		rsp[rsp_i++] = metadata_params[4];
+		for (i = 0; i < metadata_params[4]; i++) {
+			char metainfo[65536];
+			uint16_t attribute_id = (metadata_params[i*2+5] << 8) |
+						metadata_params[i*2+5+1];
+			switch (attribute_id) {
+			case METADATA_TITLE:
+				rsp[rsp_i++] = (uint8_t) METADATA_TITLE &
+						0xFF00;
+				rsp[rsp_i++] = (uint8_t) METADATA_TITLE &
+						0x00FF;
+				snprintf(metainfo, 65536, "%s", "Get title from MPRIS");
+				rsp[rsp_i++] = strlen(metainfo);
+				memcpy(rsp + rsp_i, metainfo, rsp[rsp_i-1]);
+				rsp_i += rsp[rsp_i-1];
+				break;
+			case METADATA_ARTIST:
+				rsp[rsp_i++] = (uint8_t) METADATA_ARTIST &
+						0xFF00;
+				rsp[rsp_i++] = (uint8_t) METADATA_ARTIST &
+						0x00FF;
+				snprintf(metainfo, 65536, "%s", "Get artist from MPRIS");
+				rsp[rsp_i++] = strlen(metainfo);
+				memcpy(rsp + rsp_i, metainfo, rsp[rsp_i-1]);
+				rsp_i += rsp[rsp_i-1];
+				break;
+			case METADATA_ALBUM:
+				rsp[rsp_i++] = (uint8_t) METADATA_ALBUM &
+						0xFF00;
+				rsp[rsp_i++] = (uint8_t) METADATA_ALBUM &
+						0x00FF;
+				snprintf(metainfo, 65536, "%s", "Get album from MPRIS");
+				rsp[rsp_i++] = strlen(metainfo);
+				memcpy(rsp + rsp_i, metainfo, rsp[rsp_i-1]);
+				rsp_i += rsp[rsp_i-1];
+				break;
+			case METADATA_NUMBER:
+				rsp[rsp_i++] = (uint8_t) METADATA_NUMBER &
+						0xFF00;
+				rsp[rsp_i++] = (uint8_t) METADATA_NUMBER &
+						0x00FF;
+				snprintf(metainfo, 65536, "%s", "Get number from MPRIS");
+				rsp[rsp_i++] = strlen(metainfo);
+				memcpy(rsp + rsp_i, metainfo, rsp[rsp_i-1]);
+				rsp_i += rsp[rsp_i-1];
+				break;
+			case METADATA_TOTAL:
+				rsp[rsp_i++] = (uint8_t) METADATA_TOTAL &
+						0xFF00;
+				rsp[rsp_i++] = (uint8_t) METADATA_TOTAL &
+						0x00FF;
+				snprintf(metainfo, 65536, "%s", "Get total from MPRIS");
+				rsp[rsp_i++] = strlen(metainfo);
+				memcpy(rsp + rsp_i, metainfo, rsp[rsp_i-1]);
+				rsp_i += rsp[rsp_i-1];
+				break;
+			case METADATA_GENRE:
+				rsp[rsp_i++] = (uint8_t) METADATA_GENRE &
+						0xFF00;
+				rsp[rsp_i++] = (uint8_t) METADATA_GENRE &
+						0x00FF;
+				snprintf(metainfo, 65536, "%s", "Get genre from MPRIS");
+				rsp[rsp_i++] = strlen(metainfo);
+				memcpy(rsp + rsp_i, metainfo, rsp[rsp_i-1]);
+				rsp_i += rsp[rsp_i-1];
+				break;
+			case METADATA_PLAY_TIME:
+				rsp[rsp_i++] = (uint8_t) METADATA_PLAY_TIME &
+						0xFF00;
+				rsp[rsp_i++] = (uint8_t) METADATA_PLAY_TIME &
+						0x00FF;
+				snprintf(metainfo, 65536, "%s", "Get time from MPRIS");
+				rsp[rsp_i++] = strlen(metainfo);
+				memcpy(rsp + rsp_i, metainfo, rsp[rsp_i-1]);
+				rsp_i += rsp[rsp_i-1];
+				break;
+			default:
+				avrcp->code = CTYPE_REJECTED;
+				metadata->parameter_length = 1;
+				metadata_params[0] = E_INVALID_PARAM;
+				return;
+			}
+			rsp[rsp_i++] = (uint8_t) CHARSET_UTF8 & 0xFF00;
+			rsp[rsp_i++] = (uint8_t) CHARSET_UTF8 & 0x00FF;
+			/* Attribute value length (2 bytes) */
+			rsp[rsp_i++] = 0;
+			rsp[rsp_i++] = 0;
+			memcpy(metadata_params, rsp, rsp_i);
+		}
+	case GET_PLAY_STATUS:
+		avrcp->code = CTYPE_STABLE;
+		/* get song length, position and player status from MPRIS */
+		for (i = 0; i < 8; i++)
+			metadata_params[i] = 0xFF;
+		metadata_params[8] = PLAY_STOPPED;
+		break;
+	default:
+		avrcp->code = CTYPE_REJECTED;
+		metadata->parameter_length = 1;
+		metadata_params[0] = E_INVALID_COMMAND;
+		break;
+	}
+}
+
 static gboolean control_cb(GIOChannel *chan, GIOCondition cond,
 				gpointer data)
 {
@@ -570,6 +1116,24 @@ static gboolean control_cb(GIOChannel *chan, GIOCondition cond,
 			operands[1] = SUBUNIT_PANEL << 3;
 		DBG("reply to %s", avrcp->opcode == OP_UNITINFO ?
 				"OP_UNITINFO" : "OP_SUBUNITINFO");
+	} else if (avctp->cr == AVCTP_COMMAND &&
+			(avrcp->code == CTYPE_STATUS ||
+				avrcp->code == CTYPE_CONTROL) &&
+			avrcp->subunit_type == SUBUNIT_PANEL &&
+			avrcp->opcode == OP_VENDORDEPENDENT &&
+			operand_count >= 3) {
+		uint32_t company_id = (operands[0] << 16) |
+					(operands[1] << 8) |
+					(operands[2]);
+		DBG("AVRCP vendor 0x%06X dependent command", company_id);
+		if (company_id == IEEEID_BTSIG) {
+			DBG("AVRCP metadata PDU");
+			avctp->cr = AVCTP_RESPONSE;
+			handle_metadata_pdu(control, avrcp, operand_count);
+		} else {
+			avctp->cr = AVCTP_RESPONSE;
+			avrcp->code = CTYPE_NOT_IMPLEMENTED;
+		}
 	} else {
 		avctp->cr = AVCTP_RESPONSE;
 		avrcp->code = CTYPE_REJECTED;
@@ -1086,15 +1650,162 @@ static DBusMessage *control_get_properties(DBusConnection *conn,
 	value = (device->control->state == AVCTP_STATE_CONNECTED);
 	dict_append_entry(&dict, "Connected", DBUS_TYPE_BOOLEAN, &value);
 
+	/* PlayerCapabilities */
+	value = device->control->mpris_caps;
+	dict_append_entry(&dict, "PlayerCapabilities", DBUS_TYPE_UINT32, &value);
+
+	/* PlayState */
+	value = device->control->mpris_play_state;
+	dict_append_entry(&dict, "PlayState", DBUS_TYPE_UINT32, &value);
+
+	/* ShuffleState */
+	value = device->control->mpris_shuffle_state;
+	dict_append_entry(&dict, "ShuffleState", DBUS_TYPE_BOOLEAN, &value);
+
+	/* RepeatState */
+	value = device->control->mpris_repeat_state;
+	dict_append_entry(&dict, "RepeatState", DBUS_TYPE_BOOLEAN, &value);
+
+	/* EndlessState */
+	value = device->control->mpris_endless_state;
+	dict_append_entry(&dict, "EndlessState", DBUS_TYPE_BOOLEAN, &value);
+
+	/* MediaTitle */
+	dict_append_entry(&dict, "MediaTitle", DBUS_TYPE_STRING,
+				&device->control->mpris_title);
+	/* MediaArtist */
+	dict_append_entry(&dict, "MediaArtist", DBUS_TYPE_STRING,
+				&device->control->mpris_artist);
+	/* MediaAlbum */
+	dict_append_entry(&dict, "MediaAlbum", DBUS_TYPE_STRING,
+				&device->control->mpris_album);
+	/* MediaNumber */
+	dict_append_entry(&dict, "MediaNumber", DBUS_TYPE_STRING,
+				&device->control->mpris_number);
+	/* MediaGenre */
+	dict_append_entry(&dict, "MediaGenre", DBUS_TYPE_STRING,
+				&device->control->mpris_genre);
+
+	/* MediaLength */
+	dict_append_entry(&dict, "MediaLength", DBUS_TYPE_UINT32,
+				&device->control->mpris_total);
+
 	dbus_message_iter_close_container(&iter, &dict);
 
 	return reply;
+}
+
+static DBusMessage *control_set_property(DBusConnection *conn,
+						DBusMessage *msg, void *data)
+{
+	struct audio_device *device = data;
+	struct control *control = device->control;
+	const char *property;
+	DBusMessageIter iter;
+	DBusMessageIter sub;
+
+	if (!dbus_message_iter_init(msg, &iter))
+		return invalid_args(msg);
+
+	if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_STRING)
+		return invalid_args(msg);
+
+	dbus_message_iter_get_basic(&iter, &property);
+	dbus_message_iter_next(&iter);
+
+	if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_VARIANT)
+		return invalid_args(msg);
+	dbus_message_iter_recurse(&iter, &sub);
+
+	if (g_str_equal("PlayerCapabilities", property) ||
+			g_str_equal("PlayState", property) ||
+			g_str_equal("MediaLength", property)) {
+		uint32_t value;
+
+		if (dbus_message_iter_get_arg_type(&sub) != DBUS_TYPE_UINT32)
+			return invalid_args(msg);
+		dbus_message_iter_get_basic(&sub, &value);
+
+		if (g_str_equal("PlayerCapabilities", property))
+			control->mpris_caps = value;
+		else if (g_str_equal("PlayState", property))
+			control->mpris_play_state = value;
+		else if (g_str_equal("MediaLength", property))
+			control->mpris_total = value;
+
+		emit_property_changed(conn, dbus_message_get_path(msg),
+					AUDIO_CONTROL_INTERFACE, property,
+					DBUS_TYPE_UINT32, &value);
+
+		return dbus_message_new_method_return(msg);
+
+	} else if (g_str_equal("ShuffleState", property) ||
+			g_str_equal("RepeatState", property) ||
+			g_str_equal("EndlessState", property)) {
+		gboolean value;
+
+		if (dbus_message_iter_get_arg_type(&sub) != DBUS_TYPE_BOOLEAN)
+			return invalid_args(msg);
+		dbus_message_iter_get_basic(&sub, &value);
+
+		if (g_str_equal("ShuffleState", property))
+			control->mpris_shuffle_state = value;
+		else if (g_str_equal("RepeatState", property))
+			control->mpris_repeat_state = value;
+		else if (g_str_equal("EndlessState", property))
+			control->mpris_endless_state = value;
+
+		emit_property_changed(conn, dbus_message_get_path(msg),
+					AUDIO_CONTROL_INTERFACE, property,
+					DBUS_TYPE_BOOLEAN, &value);
+
+		return dbus_message_new_method_return(msg);
+	} else if (g_str_equal("MediaTitle", property) ||
+			g_str_equal("MediaArtist", property) ||
+			g_str_equal("MediaAlbum", property) ||
+			g_str_equal("MediaNumber", property) ||
+			g_str_equal("MediaGenre", property)) {
+		const char *value;
+		int size;
+
+		if (dbus_message_iter_get_arg_type(&sub) != DBUS_TYPE_STRING)
+			return invalid_args(msg);
+
+		dbus_message_iter_get_basic(&sub, &value);
+		size = strlen(value) + 1;
+
+		if (g_str_equal("MediaTitle", property)) {
+			control->mpris_title = malloc(size * sizeof(char));
+			strncpy(control->mpris_title, value, size);
+		} else if (g_str_equal("MediaArtist", property)) {
+			control->mpris_artist = malloc(size * sizeof(char));
+			strncpy(control->mpris_artist, value, size);
+		} else if (g_str_equal("MediaAlbum", property)) {
+			control->mpris_album = malloc(size * sizeof(char));
+			strncpy(control->mpris_album, value, size);
+		} else if (g_str_equal("MediaNumber", property)) {
+			control->mpris_number = malloc(size * sizeof(char));
+			strncpy(control->mpris_number, value, size);
+		} else if (g_str_equal("MediaGenre", property)) {
+			control->mpris_genre = malloc(size * sizeof(char));
+			strncpy(control->mpris_genre, value, size);
+		}
+
+		emit_property_changed(conn, dbus_message_get_path(msg),
+					AUDIO_CONTROL_INTERFACE, property,
+					DBUS_TYPE_STRING, &value);
+
+		return dbus_message_new_method_return(msg);
+	}
+
+	return invalid_args(msg);
 }
 
 static GDBusMethodTable control_methods[] = {
 	{ "IsConnected",	"",	"b",	control_is_connected,
 						G_DBUS_METHOD_FLAG_DEPRECATED },
 	{ "GetProperties",	"",	"a{sv}",control_get_properties },
+	{ "SetProperty",	"sv",	"",	control_set_property },
 	{ "VolumeUp",		"",	"",	volume_up },
 	{ "VolumeDown",		"",	"",	volume_down },
 	{ NULL, NULL, NULL, NULL }
@@ -1104,6 +1815,9 @@ static GDBusSignalTable control_signals[] = {
 	{ "Connected",			"",	G_DBUS_SIGNAL_FLAG_DEPRECATED},
 	{ "Disconnected",		"",	G_DBUS_SIGNAL_FLAG_DEPRECATED},
 	{ "PropertyChanged",		"sv"	},
+	{ "SetRepeatState",		"b"	},
+	{ "SetShuffleState",		"b"	},
+	{ "SetScanState",		"b"	},
 	{ NULL, NULL }
 };
 
