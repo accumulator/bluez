@@ -1134,11 +1134,16 @@ static gboolean control_cb(GIOChannel *chan, GIOCondition cond,
 			avctp->cr = AVCTP_RESPONSE;
 			avrcp->code = CTYPE_NOT_IMPLEMENTED;
 		}
+	} else if (avctp->cr == AVCTP_RESPONSE) {
+		goto noresponse;
 	} else {
 		avctp->cr = AVCTP_RESPONSE;
 		avrcp->code = CTYPE_REJECTED;
 	}
+
 	ret = write(sock, buf, packet_size);
+
+noresponse:
 
 	return TRUE;
 
