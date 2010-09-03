@@ -1532,6 +1532,24 @@ static DBusMessage *control_is_connected(DBusConnection *conn,
 	return reply;
 }
 
+static DBusMessage *control_connect(DBusConnection *conn,
+						DBusMessage *msg,
+						void *data)
+{
+	struct audio_device *device = data;
+	struct control *control = device->control;
+	DBusMessage *reply;
+	int err;
+
+	reply = dbus_message_new_method_return(msg);
+	if (!reply)
+		return NULL;
+
+	avrcp_connect(device);
+
+	return dbus_message_new_method_return(msg);
+}
+
 static int avctp_send_passthrough(struct control *control, uint8_t op)
 {
 	unsigned char buf[AVCTP_HEADER_LENGTH + AVRCP_HEADER_LENGTH + 2];
@@ -1802,6 +1820,7 @@ static DBusMessage *control_set_property(DBusConnection *conn,
 }
 
 static GDBusMethodTable control_methods[] = {
+	{ "Connect",		"", "",	control_connect },
 	{ "IsConnected",	"",	"b",	control_is_connected,
 						G_DBUS_METHOD_FLAG_DEPRECATED },
 	{ "GetProperties",	"",	"a{sv}",control_get_properties },
